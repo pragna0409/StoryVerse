@@ -1,0 +1,314 @@
+// backend/src/services/spotifyService.ts
+import axios from 'axios';
+import { URLSearchParams } from 'url';
+
+export class SpotifyService {
+  private clientId: string;
+  private clientSecret: string;
+  private redirectUri: string;
+
+  constructor() {
+    this.clientId = process.env.SPOTIFY_CLIENT_ID!;
+    this.clientSecret = process.env.SPOTIFY_CLIENT_SECRET!;
+    this.redirectUri = process.env.SPOTIFY_REDIRECT_URI!;
+  }
+
+  getAuthorizationUrl(state: string): string {
+    const scopes = [
+      'user-read-private',
+      'user-read-email',
+      'playlist-read-private',
+      'user-top-read',
+      'user-read-recently-played'
+    ].join(' ');
+
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: this.clientId,
+      scope: scopes,
+      redirect_uri: this.redirectUri,
+      state: state
+    });
+
+    return `https://accounts.spotify.com/authorize?${params.toString()}`;
+  }
+
+  async exchangeCodeForTokens(code: string): Promise<SpotifyTokens> {
+    try {
+      const response = await axios.post(
+        '<https://accounts.spotify.com/api/token>',
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code,
+          redirect_uri: this.redirectUri,
+          client_id: this.clientId,
+          client_secret: this.clientSecret
+        }),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        }
+      );
+
+      return response.data;
+    } catch (error) {
+      throw new Error('Failed to exchange code for tokens');
+    }
+  }
+
+  async refreshAccessToken(refreshToken: string): Promise<SpotifyTokens> {
+    try {
+      const response = await axios.post(
+        '<https://accounts.spotify.com/api/token>',
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+          client_id: this.clientId,
+          client_secret: this.clientSecret
+        }),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        }
+      );
+
+      return response.data;
+    } catch (error) {
+      throw new Error('Failed to refresh access token');
+    }
+  }
+
+  async getUserProfile(accessToken: string): Promise<SpotifyUser> {
+    try {
+      const response = await axios.get('<https://api.spotify.com/v1/me>', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
+      });
+
+      return response.data;
+    } catch (error) {
+      throw new Error('Failed to get user profile');
+    }
+  }
+
+  async getUserPlaylists(accessToken: string, limit: number = 50): Promise<SpotifyPlaylist[]> {
+    try {
+      const response = await axios.get(
+        `https://api.spotify.com/v1/me/playlists?limit=${limit}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        }
+      );
+
+      return response.data.items;
+    } catch (error) {
+      throw new Error('Failed to get user playlists');
+    }
+  }
+
+  async getPlaylistTracks(
+    accessToken: string,
+    playlistId: string,
+    limit: number = 100
+  ): Promise<SpotifyTrack[]> {
+    try {
+      const response = await axios.get(
+        `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=${limit}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        }
+      );
+
+      return response.data.items.map((item: any) => item.track);
+    } catch (error) {
+      throw new Error('Failed to get playlist tracks');
+    }
+  }
+
+  async getUserTopTracks(
+    accessToken: string,
+    timeRange: 'short_term' | 'medium_term' | 'long_term' = 'medium_term',
+    limit: number = 50
+  ): Promise<SpotifyTrack[]> {
+    try {
+      const response = await axios.get(
+        `https://api.spotify.com/v1/me/top/tracks?time_range=${timeRange}&limit=${limit}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        }
+      );
+
+      return response.data.items;
+    } catch (error) {
+      throw new Error('Failed to get top tracks');
+    }
+  }
+
+  async getAudioFeatures(accessToken: string, trackIds: string[]): Promise<SpotifyAudioFeatures[]> {
+    try {
+      const response = await axios.get(
+        `https://api.spotify.com/v1/audio-features?ids=${trackIds.join(',')}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        }
+      );
+
+      return response.data.audio_features;
+    } catch (error) {
+      throw new Error('Failed to get audio features');
+    }
+  }
+
+  async createReadingPlaylist(
+    accessToken: string,
+    userId: string,
+    playlistName: string,
+    trackUris: string[]
+  ): Promise<SpotifyPlaylist> {
+    try {
+      // Create playlist
+      const createResponse = await axios.post(
+        `https://api.spotify.com/v1/users/${userId}/playlists`,
+        {
+          name: playlistName,
+          description: 'Generated by StoryVerse for reading',
+          public: false
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      const playlist = createResponse.data;
+
+      // Add tracks to playlist
+      if (trackUris.length > 0) {
+        await axios.post(
+          `https://api.spotify.com/v1/playlists/${playlist.id}/tracks`,
+          {
+            uris: trackUris
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+      }
+
+      return playlist;
+    } catch (error) {
+      throw new Error('Failed to create reading playlist');
+    }
+  }
+}
+
+// Spotify integration controller
+export class SpotifyController {
+  constructor(private spotifyService: SpotifyService) {}
+
+  async initiateConnection(req: Request, res: Response) {
+    try {
+      const userId = req.user.id;
+      const state = Buffer.from(JSON.stringify({ userId })).toString('base64');
+
+      const authUrl = this.spotifyService.getAuthorizationUrl(state);
+
+      res.json({ authUrl });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to initiate Spotify connection' });
+    }
+  }
+
+  async handleCallback(req: Request, res: Response) {
+    try {
+      const { code, state } = req.query;
+
+      if (!code || !state) {
+        return res.status(400).json({ error: 'Missing code or state parameter' });
+      }
+
+      // Decode state to get user ID
+      const stateData = JSON.parse(Buffer.from(state as string, 'base64').toString());
+      const userId = stateData.userId;
+
+      // Exchange code for tokens
+      const tokens = await this.spotifyService.exchangeCodeForTokens(code as string);
+
+      // Get user profile
+      const profile = await this.spotifyService.getUserProfile(tokens.access_token);
+
+      // Save connection to database
+      await this.saveSpotifyConnection(userId, tokens, profile);
+
+      // Analyze user's music preferences
+      await this.analyzeSpotifyData(userId, tokens.access_token);
+
+      res.redirect(`${process.env.FRONTEND_URL}/profile?spotify=connected`);
+    } catch (error) {
+      console.error('Spotify callback error:', error);
+      res.redirect(`${process.env.FRONTEND_URL}/profile?spotify=error`);
+    }
+  }
+
+  async generateReadingPlaylist(req: Request, res: Response) {
+    try {
+      const userId = req.user.id;
+      const { genre, mood, duration } = req.body;
+
+      // Get user's Spotify connection
+      const connection = await this.getSpotifyConnection(userId);
+      if (!connection) {
+        return res.status(400).json({ error: 'Spotify not connected' });
+      }
+
+      // Generate playlist based on reading context
+      const playlist = await this.createContextualPlaylist(
+        connection.accessToken,
+        connection.spotifyUserId,
+        genre,
+        mood,
+        duration
+      );
+
+      res.json({ playlist });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to generate reading playlist' });
+    }
+  }
+
+  private async analyzeSpotifyData(userId: string, accessToken: string) {
+    try {
+      // Get user's playlists and top tracks
+      const playlists = await this.spotifyService.getUserPlaylists(accessToken);
+      const topTracks = await this.spotifyService.getUserTopTracks(accessToken);
+
+      // Analyze music preferences
+      const analysis = await this.analyzeMusicPreferences(accessToken, playlists, topTracks);
+
+      // Save analysis to user profile
+      await this.updateUserMusicProfile(userId, analysis);
+
+      // Generate updated book recommendations
+      await this.updateRecommendationsBasedOnMusic(userId, analysis);
+
+    } catch (error) {
+      console.error('Failed to analyze Spotify data:', error);
+    }
+  }
+}
